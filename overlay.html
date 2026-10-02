@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <title>M+ chat blocker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --panel: rgba(14, 18, 26, 1);
+      /* panel fill; lower the alpha to let the game show through */
+      --edge: #2a3242;
+      --text: #ece6d8;
+      --muted: #8a92a0;
+      --key: #a335ee;
+      /* epic-quality purple, the keystone's own color */
+      --empty: #3a4252;
+      --timed: #5ccf73;
+      --over: #e0605a;
+      --live: #f0b232;
+      /* boss currently engaged */
+    }
+
+    /* Text size is set by fit() in the script: the largest size at which everything fits the
+     browser source. Just size the source in OBS to cover chat; everything else follows. */
+    html {
+      font-size: 16px;
+    }
+
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: transparent;
+    }
+
+    body {
+      font-family: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .panel {
+      box-sizing: border-box;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      padding: 0.45rem 0.6rem;
+      background: var(--panel);
+      border: 1px solid var(--edge);
+      border-radius: 0.35rem;
+      overflow: hidden;
+    }
+
+    .panel>* {
+      flex: none;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 0.5rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 1px solid var(--edge);
+    }
+
+    /* The one loud element: the key level. */
+    .key {
+      min-width: 2.3rem;
+      height: 2.3rem;
+      padding: 0 0.25rem;
+      box-sizing: border-box;
+      display: grid;
+      place-items: center;
+      border-radius: 0.35rem;
+      background: var(--key);
+      color: #fff;
+      font-weight: 700;
+      font-size: 1.5rem;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .key .plus {
+      font-size: 0.6em;
+      vertical-align: 0.35em;
+      margin-right: 0.04em;
+    }
+
+    .key.is-empty {
+      background: var(--empty);
+      color: var(--muted);
+    }
+
+    .title {
+      min-width: 0;
+    }
+
+    .dungeon {
+      font-weight: 700;
+      font-size: 1.2rem;
+      line-height: 1.05;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .status {
+      font-weight: 500;
+      font-size: 0.8rem;
+      line-height: 1.15;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .status:empty {
+      display: none;
+    }
+
+    .status.is-timed {
+      color: var(--timed);
+    }
+
+    .status.is-over {
+      color: var(--over);
+    }
+
+    .timer {
+      font-weight: 600;
+      font-size: 1.4rem;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .timer.is-timed {
+      color: var(--timed);
+    }
+
+    .timer.is-over {
+      color: var(--over);
+    }
+
+    /* Party and bosses: stacked in a tall source, side by side in a wide one. */
+    .lists {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .lists>ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.1rem;
+      min-width: 0;
+    }
+
+    .bosses {
+      padding-top: 0.4rem !important;
+      border-top: 1px solid var(--edge);
+    }
+
+    .bosses:empty {
+      display: none !important;
+    }
+
+    @media (min-aspect-ratio: 9/5) {
+      .lists {
+        flex-direction: row;
+        gap: 0.6rem;
+      }
+
+      .party {
+        flex: 1 1 0;
+      }
+
+      .bosses {
+        flex: 1.4 1 0;
+        padding: 0 0 0 0.6rem !important;
+        border-top: 0;
+        border-left: 1px solid var(--edge);
+      }
+    }
+
+    .member {
+      display: grid;
+      grid-template-columns: 0.85rem minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 0.4rem;
+      font-size: 1rem;
+      line-height: 1.15;
+    }
+
+    .member svg {
+      width: 0.8rem;
+      height: 0.8rem;
+      fill: var(--muted);
+    }
+
+    .member .name {
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .member .spec {
+      font-weight: 500;
+      font-size: 0.75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .empty-party {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    /* Boss pulls and kills for the current run. Times are "into the key" when a key is running. */
+    .boss {
+      display: grid;
+      grid-template-columns: 0.75rem minmax(0, 1fr) auto auto;
+      align-items: center;
+      column-gap: 0.35rem;
+      font-size: 0.9rem;
+      line-height: 1.2;
+    }
+
+    .boss svg {
+      width: 0.7rem;
+      height: 0.7rem;
+      fill: var(--muted);
+    }
+
+    .boss.is-pulling svg {
+      fill: var(--live);
+    }
+
+    .boss.is-killed svg {
+      fill: var(--timed);
+    }
+
+    .boss.is-wipe svg {
+      fill: var(--over);
+    }
+
+    .boss .name {
+      display: flex;
+      min-width: 0;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .boss .name .n {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .boss .wipes {
+      flex: none;
+      font-weight: 500;
+      font-size: 0.85em;
+      color: var(--muted);
+      margin-left: 0.3em;
+    }
+
+    .boss .when {
+      font-weight: 500;
+      font-size: 0.85em;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .boss .len {
+      min-width: 2.2em;
+      font-weight: 600;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .boss.is-pulling .len {
+      color: var(--live);
+    }
+
+    .boss.is-wipe .len {
+      color: var(--over);
+    }
+  </style>
+</head>
+
+<body>
+  <main class="panel" id="panel">
+    <header>
+      <div class="key is-empty" id="key">–</div>
+      <div class="title">
+        <div class="dungeon" id="dungeon">Between keys</div>
+        <div class="status" id="status"></div>
+      </div>
+      <div class="timer" id="timer"></div>
+    </header>
+    <div class="lists">
+      <ul class="party" id="party"></ul>
+      <ul class="bosses" id="bosses"></ul>
+    </div>
+  </main>
+  <script>
+    // Official class colors.
+    const CLASS_COLORS = {
+      DEATHKNIGHT: '#C41E3A', DEMONHUNTER: '#A330C9', DRUID: '#FF7C0A', EVOKER: '#33937F',
+      HUNTER: '#AAD372', MAGE: '#3FC7EB', MONK: '#00FF98', PALADIN: '#F48CBA',
+      PRIEST: '#FFFFFF', ROGUE: '#FFF468', SHAMAN: '#0070DD', WARLOCK: '#8788EE', WARRIOR: '#C69B6D'
+    };
+
+    const ROLE_ICONS = {
+      TANK: 'M8 1l6 2.2v4.3c0 3.9-2.7 6.4-6 7.5-3.3-1.1-6-3.6-6-7.5V3.2z',
+      HEALER: 'M6 1h4v5h5v4h-5v5H6v-5H1V6h5z',
+      DAMAGER: 'M14.5 1L15 1.5 7.6 10.9l1.6 1.6-1.1 1.1-1.6-1.6-3.1 3.1-1.5-1.5 3.1-3.1-1.6-1.6 1.1-1.1 1.6 1.6z',
+      UNKNOWN: 'M8 5a3 3 0 110 6 3 3 0 010-6z'
+    };
+
+    const BOSS_ICONS = {
+      pulling: 'M8 3.5a4.5 4.5 0 110 9 4.5 4.5 0 010-9z',
+      killed: 'M6.2 12L2.4 8.2l1.4-1.4 2.4 2.4 6-6 1.4 1.4z',
+      wipe: 'M3.4 2L8 6.6 12.6 2 14 3.4 9.4 8l4.6 4.6-1.4 1.4L8 9.4 3.4 14 2 12.6 6.6 8 2 3.4z'
+    };
+
+    const $ = id => document.getElementById(id);
+    let data = null;
+    let lastUpdated = null;
+    let livePulls = [];   // [{ el, pulledAt }] for bosses currently engaged, ticked every second
+
+    function fmt(ms) {
+      if (ms == null || ms < 0) return '';
+      const s = Math.floor(ms / 1000);
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+      const mm = h ? String(m).padStart(2, '0') : String(m);
+      return (h ? h + ':' : '') + mm + ':' + String(sec).padStart(2, '0');
+    }
+
+    function icon(d) {
+      const ns = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(ns, 'svg');
+      svg.setAttribute('viewBox', '0 0 16 16');
+      svg.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+      return svg;
+    }
+    const roleIcon = role => icon(ROLE_ICONS[role] || ROLE_ICONS.UNKNOWN);
+
+    // Time into the key (keyStart = that key's start) if there is one, otherwise the clock time.
+    function when(ms, keyStart) {
+      if (ms == null) return '';
+      if (keyStart && ms >= keyStart) return fmt(ms - keyStart);
+      return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+
+    function renderBosses(d) {
+      const list = $('bosses');
+      list.replaceChildren();
+      livePulls = [];
+      const asList = v => Array.isArray(v) ? v : (v ? [v] : []);
+      let bosses = asList(d.bosses), keyStart = d.startedAt;
+      // Between keys: show the bosses from the last finished key.
+      if (!bosses.length && d.status === 'idle' && d.last) {
+        bosses = asList(d.last.bosses);
+        keyStart = d.last.startedAt;
+      }
+      for (const b of bosses) {
+        const li = document.createElement('li');
+        li.className = 'boss is-' + (b.result || 'pulling');
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        const n = document.createElement('span');
+        n.className = 'n';
+        n.textContent = b.name || 'Unknown boss';
+        name.appendChild(n);
+        if (b.wipes > 0) {
+          const w = document.createElement('span');
+          w.className = 'wipes';
+          w.textContent = b.wipes === 1 ? '1 wipe' : b.wipes + ' wipes';
+          name.appendChild(w);
+        }
+
+        const at = document.createElement('span');
+        at.className = 'when';
+        const len = document.createElement('span');
+        len.className = 'len';
+
+        if (b.result === 'pulling') {
+          at.textContent = when(b.pulledAt, keyStart) + ' \u2192';
+          livePulls.push({ el: len, pulledAt: b.pulledAt });
+        } else {
+          at.textContent = when(b.pulledAt, keyStart) + ' \u2192 ' + when(b.endedAt, keyStart);
+          len.textContent = fmt(b.fightMs);
+        }
+
+        li.append(icon(BOSS_ICONS[b.result] || BOSS_ICONS.pulling), name, at, len);
+        list.appendChild(li);
+      }
+    }
+
+    function render() {
+      const d = data || { status: 'idle', party: [] };
+      const hasKey = d.level && (d.status === 'running' || d.status === 'finished');
+
+      // Key badge
+      const key = $('key');
+      key.replaceChildren();
+      if (hasKey) {
+        const plus = document.createElement('span');
+        plus.className = 'plus';
+        plus.textContent = '+';
+        key.append(plus, String(d.level));
+        key.className = 'key';
+      } else {
+        key.textContent = '–';
+        key.className = 'key is-empty';
+      }
+
+      // Dungeon + status line
+      $('dungeon').textContent = d.status === 'idle' ? (d.title || 'Between keys') : (d.dungeon || 'Unknown dungeon');
+      const status = $('status');
+      status.className = 'status';
+      if (d.status === 'finished') {
+        status.textContent = d.timed ? 'Timed' : 'Over time';
+        status.classList.add(d.timed ? 'is-timed' : 'is-over');
+      } else if (d.status === 'waiting') {
+        status.textContent = 'Waiting for key';
+      } else if (d.status === 'idle' && d.last) {
+        const l = d.last;
+        status.textContent = `Last key: ${l.dungeon} +${l.level}, ${l.timed ? 'timed' : 'over time'} in ${fmt(l.durationMs)}`;
+        status.classList.add(l.timed ? 'is-timed' : 'is-over');
+      } else {
+        status.textContent = '';
+      }
+
+      // Party
+      const list = $('party');
+      list.replaceChildren();
+      const party = Array.isArray(d.party) ? d.party : (d.party ? [d.party] : []);
+      if (!party.length) {
+        const li = document.createElement('li');
+        li.className = 'empty-party';
+        li.textContent = 'No group yet';
+        list.appendChild(li);
+      }
+      for (const p of party) {
+        const li = document.createElement('li');
+        li.className = 'member';
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = p.name || '…';
+        name.style.color = CLASS_COLORS[p.class] || 'var(--text)';
+        const spec = document.createElement('span');
+        spec.className = 'spec';
+        spec.textContent = p.spec || '';
+        li.append(roleIcon(p.role), name, spec);
+        list.appendChild(li);
+      }
+
+      renderBosses(d);
+      tick();
+      fit();
+    }
+
+    function tick() {
+      const d = data;
+      const timer = $('timer');
+      timer.className = 'timer';
+      if (d && d.status === 'running' && d.startedAt) {
+        timer.textContent = fmt(Date.now() - d.startedAt);
+      } else if (d && d.status === 'finished') {
+        timer.textContent = fmt(d.durationMs);
+        timer.classList.add(d.timed ? 'is-timed' : 'is-over');
+      } else {
+        timer.textContent = '';
+      }
+
+      for (const p of livePulls) {
+        p.el.textContent = p.pulledAt ? fmt(Date.now() - p.pulledAt) : '';
+      }
+    }
+
+    // data.js is loaded as a script (not fetched) so this works from a plain local file.
+    function poll() {
+      const s = document.createElement('script');
+      s.src = 'data.js?t=' + Date.now();
+      s.onload = () => {
+        s.remove();
+        const d = window.__wowOverlay;
+        if (d && d.updated !== lastUpdated) {
+          lastUpdated = d.updated;
+          data = d;
+          render();
+        }
+      };
+      s.onerror = () => s.remove();   // script not running yet: keep showing the last state
+      document.head.appendChild(s);
+    }
+
+
+    // Largest text size (px) at which the whole panel fits the browser source without clipping.
+    // Capped so a mostly empty panel (between keys) doesn't blow up to giant text.
+    function fit() {
+      const panel = $('panel');
+      const root = document.documentElement;
+      const fits = px => { root.style.fontSize = px + 'px'; return panel.scrollHeight <= panel.clientHeight + 1; };
+      let lo = 8, hi = Math.max(lo, Math.min(40, innerWidth / 18, innerHeight / 6));
+      let size = hi;
+      if (!fits(hi)) {
+        for (let i = 0; i < 10; i++) {
+          const mid = (lo + hi) / 2;
+          if (fits(mid)) lo = mid; else hi = mid;
+        }
+        size = lo;
+      }
+      // Then trade up to 20% of that size to stop names being cut off with "…".
+      const cut = () => [...document.querySelectorAll('.member .name, .boss .name .n')]
+        .some(el => el.scrollWidth > el.clientWidth + 1);
+      const floor = size * 0.8;
+      root.style.fontSize = size + 'px';
+      while (cut() && size * 0.96 >= floor) {
+        size *= 0.96;
+        root.style.fontSize = size + 'px';
+      }
+    }
+    addEventListener('resize', fit);
+    if (document.fonts) document.fonts.ready.then(fit);
+
+    render();
+    poll();
+    setInterval(poll, 1000);
+    setInterval(tick, 1000);
+  </script>
+</body>
+
+</html>
