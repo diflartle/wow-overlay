@@ -192,7 +192,7 @@
 
     .member {
       display: grid;
-      grid-template-columns: 0.85rem minmax(0, 1fr) auto;
+      grid-template-columns: 0.85rem minmax(0, 1fr) auto auto;
       align-items: center;
       column-gap: 0.4rem;
       font-size: 1rem;
@@ -217,6 +217,15 @@
       font-size: 0.75rem;
       color: var(--muted);
       white-space: nowrap;
+    }
+
+    /* raider.io M+ score, in raider.io's color for that score. */
+    .member .score {
+      min-width: 2.1em;
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
     }
 
     .empty-party {
@@ -466,7 +475,11 @@
         const spec = document.createElement('span');
         spec.className = 'spec';
         spec.textContent = p.spec || '';
-        li.append(roleIcon(p.role), name, spec);
+        const score = document.createElement('span');
+        score.className = 'score';
+        score.textContent = p.score ? String(p.score) : '';
+        score.style.color = p.scoreColor || 'var(--text)';
+        li.append(roleIcon(p.role), name, spec, score);
         list.appendChild(li);
       }
 

@@ -5,7 +5,7 @@ An OBS overlay for World of Warcraft Mythic+ that sits over your chat box and sh
 ## What it shows
 
 - **Key level and dungeon**, with a live timer that turns green when timed and red when over time.
-- **Party**, with names in class colors, a role icon, and spec.
+- **Party**, with names in class colors, a role icon, spec, and each member's Mythic+ score from [raider.io](https://raider.io) in raider.io's colors.
 - **Bosses**, with pull and kill times (into the key), fight length, and a wipe count. A boss you're currently fighting is highlighted and its timer ticks live.
 - **Between keys**, a summary of your last key, or a custom title such as "Farming crests with Ulk".
 
@@ -69,6 +69,8 @@ To go back to "Between keys", empty or delete `title.txt`. The title is kept bet
 | `-FinishedHoldSeconds` | `30`                                                     | How long the final time stays up after a key before switching to "Between keys"            |
 | `-CatchUpMB`           | `20`                                                     | How much of the existing log to read at startup, so a key already in progress is picked up |
 | `-OutFile`             | `data.js` next to the script                             | Where to write data. Must stay next to `overlay.html`                                      |
+| `-Region`              | `us`                                                     | Region for raider.io lookups when the combat log doesn't include it (`us`, `eu`, `kr`, `tw`) |
+| `-NoScores`            | off                                                      | Turns off raider.io score lookups                                                          |
 | `-Demo`                | off                                                      | Cycles through fake data so you can position and style the overlay without WoW running     |
 
 ## Customizing the look
@@ -81,3 +83,4 @@ Open `overlay.html` in a text editor. The colors are at the top under `:root`. T
 - **"No combat log … yet"**: you haven't typed `/combatlog` this session, or `-LogDir` points at the wrong folder.
 - **Overlay stuck or blank**: make sure the script is running and that `overlay.html` and `data.js` are in the same folder. Right-click the source in OBS and choose **Refresh**.
 - **Party missing or incomplete**: the full roster is filled in when the key starts or a boss is pulled.
+- **No score next to someone**: raider.io has no profile for them or no score this season. The script window says which. Scores are looked up only when your group changes, one person every couple of seconds, and each one is reused for an hour, so a score won't update mid-key.

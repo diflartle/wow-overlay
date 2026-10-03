@@ -5,6 +5,7 @@
 .DESCRIPTION
     Watches the newest WoWCombatLog*.txt, tracks the current dungeon, keystone level, timer and
     party, and writes the result to data.js next to this script. overlay.html polls data.js.
+    Party members' Mythic+ scores come from raider.io, looked up only when the group changes.
 
     In game: turn on Advanced Combat Logging (Options > System > Network) and type /combatlog
     each session, or use an addon that turns logging on automatically in dungeons.
@@ -29,6 +30,12 @@
     the title on the fly; empty the file (or delete it) to go back to "Between keys".
     Leave -Title off to keep whatever title.txt already says.
 
+.PARAMETER Region
+    Region used for raider.io lookups when the combat log doesn't say (us, eu, kr or tw).
+
+.PARAMETER NoScores
+    Don't look up party members' Mythic+ scores on raider.io.
+
 .PARAMETER Demo
     Cycle through fake data so you can position and style the overlay without WoW running.
 
@@ -51,6 +58,9 @@ param(
     [int]   $CatchUpMB = 20,
     [int]   $FinishedHoldSeconds = 30,
     [string]$Title,
+    [ValidateSet('us', 'eu', 'kr', 'tw')]
+    [string]$Region = 'us',
+    [switch]$NoScores,
     [switch]$Demo
 )
 
@@ -135,11 +145,11 @@ Write-Host "Title file: $TitleFile"
 # ---------------------------------------------------------------------------------------------
 if ($Demo) {
     $party = @(
-        [pscustomobject]@{ name = 'Brewtank';    realm = 'Area52';    class = 'MONK';   spec = 'Brewmaster';  role = 'TANK';    self = $false }
-        [pscustomobject]@{ name = 'Leafwhisper'; realm = 'Stormrage'; class = 'DRUID';  spec = 'Restoration'; role = 'HEALER';  self = $false }
-        [pscustomobject]@{ name = 'Emberlash';   realm = 'Area52';    class = 'MAGE';   spec = 'Fire';        role = 'DAMAGER'; self = $false }
-        [pscustomobject]@{ name = 'Nightveil';   realm = 'Illidan';   class = 'ROGUE';  spec = 'Outlaw';      role = 'DAMAGER'; self = $false }
-        [pscustomobject]@{ name = 'Totemtom';    realm = 'Area52';    class = 'SHAMAN'; spec = 'Enhancement'; role = 'DAMAGER'; self = $true  }
+        [pscustomobject]@{ name = 'Brewtank';    realm = 'Area52';    class = 'MONK';   spec = 'Brewmaster';  role = 'TANK';    self = $false; score = 3105;  scoreColor = '#ff8000' }
+        [pscustomobject]@{ name = 'Leafwhisper'; realm = 'Stormrage'; class = 'DRUID';  spec = 'Restoration'; role = 'HEALER';  self = $false; score = 2876;  scoreColor = '#e268a8' }
+        [pscustomobject]@{ name = 'Emberlash';   realm = 'Area52';    class = 'MAGE';   spec = 'Fire';        role = 'DAMAGER'; self = $false; score = 2699;  scoreColor = '#5698b3' }
+        [pscustomobject]@{ name = 'Nightveil';   realm = 'Illidan';   class = 'ROGUE';  spec = 'Outlaw';      role = 'DAMAGER'; self = $false; score = $null; scoreColor = $null }
+        [pscustomobject]@{ name = 'Totemtom';    realm = 'Area52';    class = 'SHAMAN'; spec = 'Enhancement'; role = 'DAMAGER'; self = $true;  score = 2412;  scoreColor = '#9e8ae4' }
     )
     $start = [DateTimeOffset]::Now.AddMinutes(-14.5).ToUnixTimeMilliseconds()
 
@@ -188,6 +198,124 @@ if ($Demo) {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Mythic+ scores from raider.io
+# ---------------------------------------------------------------------------------------------
+# raider.io is rate limited, so lookups only happen when the group changes, and only for members
+# without a recent score. Requests go out one at a time, a couple of seconds apart, and run in
+# the background so a slow reply never holds up the combat log.
+$ScoreFreshMinutes = 60       # a score this old is looked up again the next time the group changes
+$ScoreGapSeconds   = 2        # minimum time between requests
+
+$Scores     = @{}             # 'region|realm|name' -> @{ score; color; fresh (datetime) }
+$ScoreGroup = ''              # party the queue was last built for
+$ScoreQueue = [System.Collections.Generic.List[string]]::new()
+$ScoreReq   = $null           # @{ key; task } for the request in flight
+$ScoreNext  = [datetime]::MinValue
+$Http       = $null
+
+if (-not $NoScores) {
+    Add-Type -AssemblyName System.Net.Http
+    # Windows PowerShell 5.1 doesn't offer TLS 1.2 by default.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $Http = [System.Net.Http.HttpClient]::new()
+    $Http.Timeout = [TimeSpan]::FromSeconds(15)
+    $Http.DefaultRequestHeaders.UserAgent.ParseAdd('wow-overlay/1.0')
+    Write-Host "Looking up party M+ scores on raider.io (-NoScores to turn off)"
+}
+
+function Get-ScoreKey($p) {
+    if (-not $Http -or -not $p.name -or -not $p.realm) { return $null }
+    $r = if ($p.region -in 'us', 'eu', 'kr', 'tw') { $p.region } else { $Region }
+    "$r|$($p.realm)|$($p.name)"
+}
+
+# Called with the party's keys every time the overlay is written. Rebuilds the queue only when
+# the members actually change.
+function Update-ScoreQueue([string[]]$keys) {
+    $group = ($keys | Sort-Object) -join ','
+    if ($group -eq $script:ScoreGroup) { return }
+    $script:ScoreGroup = $group
+    $ScoreQueue.Clear()
+    foreach ($k in $keys) {
+        $e = $Scores[$k]
+        if (-not $e -or $e.fresh -lt (Get-Date)) { $ScoreQueue.Add($k) }
+    }
+}
+
+# Collects a finished request and starts the next one. Returns $true if a score changed.
+function Update-Scores {
+    if (-not $Http) { return $false }
+    $changed = $false
+    if ($script:ScoreReq) {
+        if (-not $script:ScoreReq.task.IsCompleted) { return $false }
+        $changed = Receive-Score $script:ScoreReq
+        $script:ScoreReq = $null
+    }
+    if ($ScoreQueue.Count -eq 0 -or (Get-Date) -lt $script:ScoreNext) { return $changed }
+
+    $key = $ScoreQueue[0]
+    $ScoreQueue.RemoveAt(0)
+    $r, $realm, $name = $key.Split('|')
+    $url = 'https://raider.io/api/v1/characters/profile?region={0}&realm={1}&name={2}&fields=mythic_plus_scores_by_season%3Acurrent' -f
+        $r, [uri]::EscapeDataString($realm), [uri]::EscapeDataString($name)
+    $script:ScoreReq  = @{ key = $key; task = $Http.GetAsync($url) }
+    $script:ScoreNext = (Get-Date).AddSeconds($ScoreGapSeconds)
+    return $changed
+}
+
+function Receive-Score($req) {
+    $now   = Get-Date
+    $old   = $Scores[$req.key]
+    $label = ($req.key.Split('|')[2, 1]) -join '-'
+    $res   = $null
+    try {
+        $res  = $req.task.GetAwaiter().GetResult()
+        $body = $res.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $code = [int]$res.StatusCode
+
+        if ($res.IsSuccessStatusCode) {
+            $season = @((ConvertFrom-Json $body).mythic_plus_scores_by_season)[0]
+            $score  = $null
+            $color  = $null
+            if ($season -and $season.segments.all.score -gt 0) {
+                $score = [int][math]::Floor($season.segments.all.score)
+                $color = $season.segments.all.color
+            }
+            $Scores[$req.key] = @{ score = $score; color = $color; fresh = $now.AddMinutes($ScoreFreshMinutes) }
+            Write-Host "Score: $label $(if ($score) { $score } else { 'none this season' })"
+            return ($score -ne $old.score -or $color -ne $old.color)
+        }
+        if ($code -eq 429) {
+            # Rate limited: put them back at the front of the queue and pause.
+            $wait = 60
+            if ($res.Headers.RetryAfter -and $res.Headers.RetryAfter.Delta) { $wait = [int]$res.Headers.RetryAfter.Delta.Value.TotalSeconds }
+            $ScoreQueue.Insert(0, $req.key)
+            $script:ScoreNext = $now.AddSeconds($wait)
+            Write-Host "raider.io rate limit reached; pausing score lookups for $wait seconds"
+            return $false
+        }
+        if ($code -eq 400) {
+            # raider.io's answer for an unknown character or realm. Don't ask again this session.
+            $msg = $body
+            try { $msg = (ConvertFrom-Json $body).message } catch { }
+            $Scores[$req.key] = @{ score = $null; color = $null; fresh = [datetime]::MaxValue }
+            Write-Host "No raider.io score for ${label}: $msg"
+            return ($null -ne $old.score)
+        }
+        throw "HTTP $code"
+    }
+    catch {
+        # Network trouble or a server error: keep any score we had and retry on the next group change.
+        $Scores[$req.key] = @{ score = $old.score; color = $old.color; fresh = [datetime]::MinValue }
+        Write-Host "Couldn't get raider.io score for ${label}: $($_.Exception.Message)"
+        return $false
+    }
+    finally {
+        if ($res) { $res.Dispose() }
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
 # Log parsing state
 # ---------------------------------------------------------------------------------------------
 $ord = [StringComparison]::Ordinal
@@ -220,7 +348,7 @@ $State = @{
     bosses     = [System.Collections.Generic.List[object]]::new()   # one entry per boss this run
 }
 
-$Players   = @{}   # GUID -> @{ name; realm; specId }
+$Players   = @{}   # GUID -> @{ name; realm; region; specId }
 $Party     = @{}   # GUIDs currently believed to be in your group (including you)
 $FlagCache = @{}   # GUID -> last flags string seen, so unchanged units are skipped cheaply
 $SelfGuid  = $null
@@ -231,7 +359,7 @@ $burst     = $null
 function Get-OrAddPlayer([string]$guid) {
     $p = $Players[$guid]
     if (-not $p) {
-        $p = @{ name = $null; realm = $null; specId = $null }
+        $p = @{ name = $null; realm = $null; region = $null; specId = $null }
         $Players[$guid] = $p
     }
     return $p
@@ -245,6 +373,7 @@ function Update-Unit([string]$guid, [string]$fullName, [string]$flagsHex) {
         $parts   = $fullName.Split('-')        # Name-Realm-Region
         $p.name  = $parts[0]
         if ($parts.Length -gt 1) { $p.realm = $parts[1] }
+        if ($parts.Length -gt 2) { $p.region = $parts[2].ToLower() }
         if ($Party.ContainsKey($guid)) { $script:dirty = $true }
     }
 
@@ -280,6 +409,8 @@ function Get-PartyList {
         $spec = $null
         if ($p.specId) { $spec = $Specs[[int]$p.specId] }
         $role = if ($spec) { $spec[2] } else { $null }
+        $key  = Get-ScoreKey $p
+        $score = if ($key) { $Scores[$key] } else { $null }
         [pscustomobject]@{
             name  = $p.name
             realm = $p.realm
@@ -288,9 +419,14 @@ function Get-PartyList {
             role  = $role
             self  = ($g -eq $SelfGuid)
             sort  = if ($role) { $roleOrder[$role] } else { 3 }
+            key   = $key
+            score      = $score.score
+            scoreColor = $score.color
         }
     }
-    @($rows | Sort-Object sort, name | Select-Object -First 5 name, realm, class, spec, role, self)
+    $list = @($rows | Sort-Object sort, name | Select-Object -First 5)
+    Update-ScoreQueue @($list | ForEach-Object { $_.key } | Where-Object { $_ })
+    @($list | Select-Object name, realm, class, spec, role, self, score, scoreColor)
 }
 
 function Write-Overlay {
@@ -424,6 +560,7 @@ try {
         $chunk = $reader.ReadToEnd()
         if ($chunk.Length -eq 0) {
             if (Update-Title) { $dirty = $true }
+            if (Update-Scores) { $dirty = $true }
             Test-FinishedHold
             if ($dirty) { Write-Overlay; $dirty = $false }
             Start-Sleep -Milliseconds 250
@@ -576,10 +713,12 @@ try {
         }
 
         if (Update-Title) { $dirty = $true }
+        if (Update-Scores) { $dirty = $true }
         Test-FinishedHold
         if ($dirty) { Write-Overlay; $dirty = $false }
     }
 }
 finally {
     if ($reader) { $reader.Dispose() }
+    if ($Http) { $Http.Dispose() }
 }
